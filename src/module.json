@@ -3,7 +3,7 @@
   "name": "SF2 Synth",
   "version": "0.1.0",
   "description": "SoundFont (.sf2) synthesizer using TinySoundFont",
-  "author": "TinySoundFont by schellingb",
+  "author": "TinySoundFont by schellingb (port: charlesvestal)",
   "license": "MIT",
   "ui": "ui.js",
   "dsp": "dsp.so",
