@@ -1,7 +1,7 @@
 {
   "id": "sf2",
   "name": "SF2 Synth",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "SoundFont (.sf2) synthesizer using TinySoundFont",
   "author": "TinySoundFont by schellingb (port: charlesvestal)",
   "license": "MIT",
