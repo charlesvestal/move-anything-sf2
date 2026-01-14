@@ -70,9 +70,15 @@ if [ -f "src/instrument.sf2" ]; then
     cat src/instrument.sf2 > dist/sf2/instrument.sf2
 fi
 
+# Create tarball for release
+cd dist
+tar -czvf sf2-module.tar.gz sf2/
+cd ..
+
 echo ""
 echo "=== Build Complete ==="
 echo "Output: dist/sf2/"
+echo "Tarball: dist/sf2-module.tar.gz"
 echo ""
 echo "To install on Move:"
 echo "  ./scripts/install.sh"
