@@ -3,6 +3,8 @@
  *
  * Uses TinySoundFont to render SoundFont (.sf2) files.
  * Provides polyphonic synthesis with preset selection.
+ *
+ * Supports both v1 (single instance) and v2 (multi-instance) APIs.
  */
 
 #include <stdio.h>
@@ -16,6 +18,7 @@
 #include <stdint.h>
 
 #define MOVE_PLUGIN_API_VERSION 1
+#define MOVE_PLUGIN_API_VERSION_2 2
 #define MOVE_SAMPLE_RATE 44100
 #define MOVE_FRAMES_PER_BLOCK 128
 #define MOVE_MIDI_SOURCE_INTERNAL 0
@@ -43,23 +46,24 @@ typedef struct plugin_api_v1 {
     void (*render_block)(int16_t *out_interleaved_lr, int frames);
 } plugin_api_v1_t;
 
+typedef struct plugin_api_v2 {
+    uint32_t api_version;
+    void* (*create_instance)(const char *module_dir, const char *json_defaults);
+    void (*destroy_instance)(void *instance);
+    void (*on_midi)(void *instance, const uint8_t *msg, int len, int source);
+    void (*set_param)(void *instance, const char *key, const char *val);
+    int (*get_param)(void *instance, const char *key, char *buf, int buf_len);
+    void (*render_block)(void *instance, int16_t *out_interleaved_lr, int frames);
+} plugin_api_v2_t;
+
 /* TinySoundFont implementation */
 #define TSF_IMPLEMENTATION
 #include "third_party/tsf.h"
 
-/* Plugin state */
+/* Shared host API */
 static const host_api_v1_t *g_host = NULL;
-static tsf *g_tsf = NULL;
-static int g_current_preset = 0;
-static int g_preset_count = 0;
-static int g_octave_transpose = 0;
-static char g_soundfont_path[512] = {0};
-static char g_soundfont_name[128] = "No SF2 loaded";
-static char g_preset_name[128] = "";
-static int g_active_voices = 0;
-static int g_soundfont_index = 0;
-static int g_soundfont_count = 0;
 
+/* Constants */
 #define MAX_SOUNDFONTS 64
 
 typedef struct {
@@ -67,13 +71,23 @@ typedef struct {
     char name[128];
 } soundfont_entry_t;
 
-static soundfont_entry_t g_soundfonts[MAX_SOUNDFONTS];
+/* === Per-Instance State (v2) === */
 
-/* Rendering buffer (float) */
-static float g_render_buffer[MOVE_FRAMES_PER_BLOCK * 2];
-
-/* Plugin API implementation */
-static plugin_api_v1_t g_plugin_api;
+typedef struct {
+    tsf *tsf;
+    int current_preset;
+    int preset_count;
+    int octave_transpose;
+    char soundfont_path[512];
+    char soundfont_name[128];
+    char preset_name[128];
+    int active_voices;
+    int soundfont_index;
+    int soundfont_count;
+    soundfont_entry_t soundfonts[MAX_SOUNDFONTS];
+    float render_buffer[MOVE_FRAMES_PER_BLOCK * 2];
+    char module_dir[512];
+} sf2_instance_t;
 
 /* Helper: log via host */
 static void plugin_log(const char *msg) {
@@ -84,7 +98,7 @@ static void plugin_log(const char *msg) {
     }
 }
 
-static int load_soundfont(const char *path);
+/* === Soundfont Management (instance-aware) === */
 
 static int soundfont_entry_cmp(const void *a, const void *b) {
     const soundfont_entry_t *sa = (const soundfont_entry_t *)a;
@@ -92,32 +106,26 @@ static int soundfont_entry_cmp(const void *a, const void *b) {
     return strcasecmp(sa->name, sb->name);
 }
 
-static void scan_soundfonts(const char *module_dir) {
+static void scan_soundfonts(sf2_instance_t *inst, const char *module_dir) {
     char dir_path[512];
     snprintf(dir_path, sizeof(dir_path), "%s/soundfonts", module_dir);
 
-    g_soundfont_count = 0;
+    inst->soundfont_count = 0;
 
     DIR *dir = opendir(dir_path);
-    if (!dir) {
-        return;
-    }
+    if (!dir) return;
 
     struct dirent *entry;
     while ((entry = readdir(dir)) != NULL) {
-        if (entry->d_name[0] == '.') {
-            continue;
-        }
+        if (entry->d_name[0] == '.') continue;
         const char *ext = strrchr(entry->d_name, '.');
-        if (!ext || strcasecmp(ext, ".sf2") != 0) {
-            continue;
-        }
-        if (g_soundfont_count >= MAX_SOUNDFONTS) {
+        if (!ext || strcasecmp(ext, ".sf2") != 0) continue;
+        if (inst->soundfont_count >= MAX_SOUNDFONTS) {
             plugin_log("SF2: soundfont list full, skipping extras");
             break;
         }
 
-        soundfont_entry_t *sf = &g_soundfonts[g_soundfont_count++];
+        soundfont_entry_t *sf = &inst->soundfonts[inst->soundfont_count++];
         snprintf(sf->path, sizeof(sf->path), "%s/%s", dir_path, entry->d_name);
         strncpy(sf->name, entry->d_name, sizeof(sf->name) - 1);
         sf->name[sizeof(sf->name) - 1] = '\0';
@@ -125,108 +133,104 @@ static void scan_soundfonts(const char *module_dir) {
 
     closedir(dir);
 
-    if (g_soundfont_count > 1) {
-        qsort(g_soundfonts, g_soundfont_count, sizeof(soundfont_entry_t), soundfont_entry_cmp);
+    if (inst->soundfont_count > 1) {
+        qsort(inst->soundfonts, inst->soundfont_count, sizeof(soundfont_entry_t), soundfont_entry_cmp);
     }
 }
 
-static void set_soundfont_index(int index) {
-    if (g_soundfont_count <= 0) return;
-
-    if (index < 0) index = g_soundfont_count - 1;
-    if (index >= g_soundfont_count) index = 0;
-
-    g_soundfont_index = index;
-    load_soundfont(g_soundfonts[g_soundfont_index].path);
-}
-
-/* Load a SoundFont file */
-static int load_soundfont(const char *path) {
+static int load_soundfont_inst(sf2_instance_t *inst, const char *path) {
     char msg[256];
 
-    if (g_tsf) {
-        tsf_close(g_tsf);
-        g_tsf = NULL;
+    if (inst->tsf) {
+        tsf_close(inst->tsf);
+        inst->tsf = NULL;
     }
 
     snprintf(msg, sizeof(msg), "Loading SF2: %s", path);
     plugin_log(msg);
 
-    g_tsf = tsf_load_filename(path);
-    if (!g_tsf) {
+    inst->tsf = tsf_load_filename(path);
+    if (!inst->tsf) {
         snprintf(msg, sizeof(msg), "Failed to load SF2: %s", path);
         plugin_log(msg);
-        strcpy(g_soundfont_name, "Load failed");
-        g_preset_count = 0;
+        strcpy(inst->soundfont_name, "Load failed");
+        inst->preset_count = 0;
         return -1;
     }
 
-    /* Set output mode: stereo interleaved, 44100 Hz
-     * Use -12dB global gain to provide headroom for polyphony */
-    tsf_set_output(g_tsf, TSF_STEREO_INTERLEAVED, MOVE_SAMPLE_RATE, -12.0f);
+    tsf_set_output(inst->tsf, TSF_STEREO_INTERLEAVED, MOVE_SAMPLE_RATE, -12.0f);
+    inst->preset_count = tsf_get_presetcount(inst->tsf);
 
-    /* Get preset count */
-    g_preset_count = tsf_get_presetcount(g_tsf);
-
-    /* Extract filename for display */
     const char *fname = strrchr(path, '/');
     if (fname) {
-        strncpy(g_soundfont_name, fname + 1, sizeof(g_soundfont_name) - 1);
+        strncpy(inst->soundfont_name, fname + 1, sizeof(inst->soundfont_name) - 1);
     } else {
-        strncpy(g_soundfont_name, path, sizeof(g_soundfont_name) - 1);
+        strncpy(inst->soundfont_name, path, sizeof(inst->soundfont_name) - 1);
     }
 
-    strncpy(g_soundfont_path, path, sizeof(g_soundfont_path) - 1);
-    g_soundfont_path[sizeof(g_soundfont_path) - 1] = '\0';
+    strncpy(inst->soundfont_path, path, sizeof(inst->soundfont_path) - 1);
+    inst->soundfont_path[sizeof(inst->soundfont_path) - 1] = '\0';
 
-    snprintf(msg, sizeof(msg), "SF2 loaded: %d presets", g_preset_count);
+    snprintf(msg, sizeof(msg), "SF2 loaded: %d presets", inst->preset_count);
     plugin_log(msg);
 
-    /* Select first preset */
-    g_current_preset = 0;
-    if (g_preset_count > 0) {
-        const char *name = tsf_get_presetname(g_tsf, g_current_preset);
+    inst->current_preset = 0;
+    if (inst->preset_count > 0) {
+        const char *name = tsf_get_presetname(inst->tsf, inst->current_preset);
         if (name) {
-            strncpy(g_preset_name, name, sizeof(g_preset_name) - 1);
+            strncpy(inst->preset_name, name, sizeof(inst->preset_name) - 1);
         }
     }
 
     return 0;
 }
 
-/* Select a preset by index */
-static void select_preset(int index) {
-    if (!g_tsf || g_preset_count == 0) return;
+static void set_soundfont_index_inst(sf2_instance_t *inst, int index) {
+    if (inst->soundfont_count <= 0) return;
 
-    if (index < 0) index = g_preset_count - 1;
-    if (index >= g_preset_count) index = 0;
+    if (index < 0) index = inst->soundfont_count - 1;
+    if (index >= inst->soundfont_count) index = 0;
 
-    g_current_preset = index;
+    inst->soundfont_index = index;
+    load_soundfont_inst(inst, inst->soundfonts[inst->soundfont_index].path);
+}
 
-    /* Get preset name */
-    const char *name = tsf_get_presetname(g_tsf, g_current_preset);
+static void select_preset_inst(sf2_instance_t *inst, int index) {
+    if (!inst->tsf || inst->preset_count == 0) return;
+
+    if (index < 0) index = inst->preset_count - 1;
+    if (index >= inst->preset_count) index = 0;
+
+    inst->current_preset = index;
+
+    const char *name = tsf_get_presetname(inst->tsf, inst->current_preset);
     if (name) {
-        strncpy(g_preset_name, name, sizeof(g_preset_name) - 1);
+        strncpy(inst->preset_name, name, sizeof(inst->preset_name) - 1);
     } else {
-        snprintf(g_preset_name, sizeof(g_preset_name), "Preset %d", g_current_preset);
+        snprintf(inst->preset_name, sizeof(inst->preset_name), "Preset %d", inst->current_preset);
     }
 
     char msg[128];
-    snprintf(msg, sizeof(msg), "Preset %d: %s", g_current_preset, g_preset_name);
+    snprintf(msg, sizeof(msg), "Preset %d: %s", inst->current_preset, inst->preset_name);
     plugin_log(msg);
 }
 
-/* === Plugin API callbacks === */
+/* === v2 API Implementation === */
 
-static int plugin_on_load(const char *module_dir, const char *json_defaults) {
+static void* v2_create_instance(const char *module_dir, const char *json_defaults) {
     char msg[256];
-    snprintf(msg, sizeof(msg), "SF2 plugin loading from: %s", module_dir);
+    snprintf(msg, sizeof(msg), "SF2 creating instance from: %s", module_dir);
     plugin_log(msg);
 
-    /* Try to parse default soundfont path from JSON */
+    sf2_instance_t *inst = calloc(1, sizeof(sf2_instance_t));
+    if (!inst) return NULL;
+
+    strncpy(inst->module_dir, module_dir, sizeof(inst->module_dir) - 1);
+    strcpy(inst->soundfont_name, "No SF2 loaded");
+
+    /* Parse default soundfont path from JSON */
     char default_sf[512] = {0};
     if (json_defaults) {
-        /* Simple JSON parsing for soundfont_path */
         const char *pos = strstr(json_defaults, "\"soundfont_path\"");
         if (pos) {
             pos = strchr(pos, ':');
@@ -244,7 +248,300 @@ static int plugin_on_load(const char *module_dir, const char *json_defaults) {
         }
     }
 
-    scan_soundfonts(module_dir);
+    scan_soundfonts(inst, module_dir);
+
+    if (inst->soundfont_count > 0) {
+        inst->soundfont_index = 0;
+        if (default_sf[0]) {
+            const char *default_name = strrchr(default_sf, '/');
+            default_name = default_name ? default_name + 1 : default_sf;
+            for (int i = 0; i < inst->soundfont_count; i++) {
+                if (strcmp(inst->soundfonts[i].path, default_sf) == 0 ||
+                    strcmp(inst->soundfonts[i].name, default_name) == 0) {
+                    inst->soundfont_index = i;
+                    break;
+                }
+            }
+        }
+        load_soundfont_inst(inst, inst->soundfonts[inst->soundfont_index].path);
+    } else if (default_sf[0]) {
+        load_soundfont_inst(inst, default_sf);
+    } else {
+        char sf_path[512];
+        snprintf(sf_path, sizeof(sf_path), "%s/instrument.sf2", module_dir);
+        load_soundfont_inst(inst, sf_path);
+    }
+
+    plugin_log("SF2 instance created");
+    return inst;
+}
+
+static void v2_destroy_instance(void *instance) {
+    sf2_instance_t *inst = (sf2_instance_t *)instance;
+    if (!inst) return;
+
+    plugin_log("SF2 instance destroying");
+
+    if (inst->tsf) {
+        tsf_close(inst->tsf);
+        inst->tsf = NULL;
+    }
+
+    free(inst);
+}
+
+static void v2_on_midi(void *instance, const uint8_t *msg, int len, int source) {
+    sf2_instance_t *inst = (sf2_instance_t *)instance;
+    if (!inst || !inst->tsf || len < 2) return;
+
+    uint8_t status = msg[0] & 0xF0;
+    uint8_t data1 = msg[1];
+    uint8_t data2 = (len > 2) ? msg[2] : 0;
+
+    int is_note = (status == 0x90 || status == 0x80);
+    int note = data1;
+    if (is_note) {
+        note += inst->octave_transpose * 12;
+        if (note < 0) note = 0;
+        if (note > 127) note = 127;
+    }
+
+    switch (status) {
+        case 0x90:
+            if (data2 > 0) {
+                tsf_note_on(inst->tsf, inst->current_preset, note, data2 / 127.0f);
+            } else {
+                tsf_note_off(inst->tsf, inst->current_preset, note);
+            }
+            break;
+        case 0x80:
+            tsf_note_off(inst->tsf, inst->current_preset, note);
+            break;
+        case 0xB0:
+            if (data1 == 123) {
+                tsf_note_off_all(inst->tsf);
+            }
+            break;
+        case 0xE0:
+            {
+                int bend = ((int)data2 << 7) | data1;
+                tsf_channel_set_pitchwheel(inst->tsf, 0, bend);
+            }
+            break;
+    }
+}
+
+static void v2_set_param(void *instance, const char *key, const char *val) {
+    sf2_instance_t *inst = (sf2_instance_t *)instance;
+    if (!inst) return;
+
+    if (strcmp(key, "soundfont_path") == 0) {
+        load_soundfont_inst(inst, val);
+        if (inst->soundfont_count > 0) {
+            const char *name = strrchr(val, '/');
+            name = name ? name + 1 : val;
+            for (int i = 0; i < inst->soundfont_count; i++) {
+                if (strcmp(inst->soundfonts[i].path, val) == 0 ||
+                    strcmp(inst->soundfonts[i].name, name) == 0) {
+                    inst->soundfont_index = i;
+                    break;
+                }
+            }
+        }
+    } else if (strcmp(key, "soundfont_index") == 0) {
+        set_soundfont_index_inst(inst, atoi(val));
+    } else if (strcmp(key, "next_soundfont") == 0) {
+        set_soundfont_index_inst(inst, inst->soundfont_index + 1);
+    } else if (strcmp(key, "prev_soundfont") == 0) {
+        set_soundfont_index_inst(inst, inst->soundfont_index - 1);
+    } else if (strcmp(key, "preset") == 0) {
+        select_preset_inst(inst, atoi(val));
+    } else if (strcmp(key, "octave_transpose") == 0) {
+        inst->octave_transpose = atoi(val);
+        if (inst->octave_transpose < -4) inst->octave_transpose = -4;
+        if (inst->octave_transpose > 4) inst->octave_transpose = 4;
+    } else if (strcmp(key, "all_notes_off") == 0) {
+        if (inst->tsf) {
+            tsf_note_off_all(inst->tsf);
+        }
+    }
+}
+
+static int v2_get_param(void *instance, const char *key, char *buf, int buf_len) {
+    sf2_instance_t *inst = (sf2_instance_t *)instance;
+    if (!inst) return -1;
+
+    if (strcmp(key, "soundfont_name") == 0) {
+        strncpy(buf, inst->soundfont_name, buf_len - 1);
+        return strlen(buf);
+    } else if (strcmp(key, "soundfont_path") == 0) {
+        strncpy(buf, inst->soundfont_path, buf_len - 1);
+        return strlen(buf);
+    } else if (strcmp(key, "soundfont_count") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->soundfont_count);
+    } else if (strcmp(key, "soundfont_index") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->soundfont_index);
+    } else if (strcmp(key, "preset") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->current_preset);
+    } else if (strcmp(key, "preset_name") == 0) {
+        strncpy(buf, inst->preset_name, buf_len - 1);
+        return strlen(buf);
+    } else if (strcmp(key, "preset_count") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->preset_count);
+    } else if (strcmp(key, "polyphony") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->active_voices);
+    } else if (strcmp(key, "octave_transpose") == 0) {
+        return snprintf(buf, buf_len, "%d", inst->octave_transpose);
+    }
+
+    return -1;
+}
+
+static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int frames) {
+    sf2_instance_t *inst = (sf2_instance_t *)instance;
+    if (!inst || !inst->tsf) {
+        memset(out_interleaved_lr, 0, frames * 2 * sizeof(int16_t));
+        return;
+    }
+
+    tsf_render_float(inst->tsf, inst->render_buffer, frames, 0);
+    inst->active_voices = tsf_active_voice_count(inst->tsf);
+
+    for (int i = 0; i < frames * 2; i++) {
+        float sample = inst->render_buffer[i];
+        if (sample > 1.0f) sample = 1.0f;
+        if (sample < -1.0f) sample = -1.0f;
+        out_interleaved_lr[i] = (int16_t)(sample * 32767.0f);
+    }
+}
+
+/* v2 API struct */
+static plugin_api_v2_t g_plugin_api_v2 = {
+    .api_version = MOVE_PLUGIN_API_VERSION_2,
+    .create_instance = v2_create_instance,
+    .destroy_instance = v2_destroy_instance,
+    .on_midi = v2_on_midi,
+    .set_param = v2_set_param,
+    .get_param = v2_get_param,
+    .render_block = v2_render_block
+};
+
+/* v2 Entry Point */
+plugin_api_v2_t* move_plugin_init_v2(const host_api_v1_t *host) {
+    g_host = host;
+    plugin_log("SF2 plugin initialized (v2)");
+    return &g_plugin_api_v2;
+}
+
+/* === v1 Legacy API === */
+
+static tsf *g_tsf = NULL;
+static int g_current_preset = 0;
+static int g_preset_count = 0;
+static int g_octave_transpose = 0;
+static char g_soundfont_path[512] = {0};
+static char g_soundfont_name[128] = "No SF2 loaded";
+static char g_preset_name[128] = "";
+static int g_active_voices = 0;
+static int g_soundfont_index = 0;
+static int g_soundfont_count = 0;
+static soundfont_entry_t g_soundfonts[MAX_SOUNDFONTS];
+static float g_render_buffer[MOVE_FRAMES_PER_BLOCK * 2];
+static char g_module_dir[512] = {0};
+
+static void v1_scan_soundfonts(const char *module_dir) {
+    char dir_path[512];
+    snprintf(dir_path, sizeof(dir_path), "%s/soundfonts", module_dir);
+    g_soundfont_count = 0;
+
+    DIR *dir = opendir(dir_path);
+    if (!dir) return;
+
+    struct dirent *entry;
+    while ((entry = readdir(dir)) != NULL) {
+        if (entry->d_name[0] == '.') continue;
+        const char *ext = strrchr(entry->d_name, '.');
+        if (!ext || strcasecmp(ext, ".sf2") != 0) continue;
+        if (g_soundfont_count >= MAX_SOUNDFONTS) break;
+
+        soundfont_entry_t *sf = &g_soundfonts[g_soundfont_count++];
+        snprintf(sf->path, sizeof(sf->path), "%s/%s", dir_path, entry->d_name);
+        strncpy(sf->name, entry->d_name, sizeof(sf->name) - 1);
+    }
+
+    closedir(dir);
+
+    if (g_soundfont_count > 1) {
+        qsort(g_soundfonts, g_soundfont_count, sizeof(soundfont_entry_t), soundfont_entry_cmp);
+    }
+}
+
+static int v1_load_soundfont(const char *path) {
+    char msg[256];
+
+    if (g_tsf) {
+        tsf_close(g_tsf);
+        g_tsf = NULL;
+    }
+
+    snprintf(msg, sizeof(msg), "Loading SF2: %s", path);
+    plugin_log(msg);
+
+    g_tsf = tsf_load_filename(path);
+    if (!g_tsf) {
+        strcpy(g_soundfont_name, "Load failed");
+        g_preset_count = 0;
+        return -1;
+    }
+
+    tsf_set_output(g_tsf, TSF_STEREO_INTERLEAVED, MOVE_SAMPLE_RATE, -12.0f);
+    g_preset_count = tsf_get_presetcount(g_tsf);
+
+    const char *fname = strrchr(path, '/');
+    strncpy(g_soundfont_name, fname ? fname + 1 : path, sizeof(g_soundfont_name) - 1);
+    strncpy(g_soundfont_path, path, sizeof(g_soundfont_path) - 1);
+
+    g_current_preset = 0;
+    if (g_preset_count > 0) {
+        const char *name = tsf_get_presetname(g_tsf, g_current_preset);
+        if (name) strncpy(g_preset_name, name, sizeof(g_preset_name) - 1);
+    }
+
+    return 0;
+}
+
+static void v1_set_soundfont_index(int index) {
+    if (g_soundfont_count <= 0) return;
+    if (index < 0) index = g_soundfont_count - 1;
+    if (index >= g_soundfont_count) index = 0;
+    g_soundfont_index = index;
+    v1_load_soundfont(g_soundfonts[g_soundfont_index].path);
+}
+
+static void v1_select_preset(int index) {
+    if (!g_tsf || g_preset_count == 0) return;
+    if (index < 0) index = g_preset_count - 1;
+    if (index >= g_preset_count) index = 0;
+    g_current_preset = index;
+    const char *name = tsf_get_presetname(g_tsf, g_current_preset);
+    if (name) strncpy(g_preset_name, name, sizeof(g_preset_name) - 1);
+}
+
+static int v1_on_load(const char *module_dir, const char *json_defaults) {
+    strncpy(g_module_dir, module_dir, sizeof(g_module_dir) - 1);
+
+    char default_sf[512] = {0};
+    if (json_defaults) {
+        const char *pos = strstr(json_defaults, "\"soundfont_path\"");
+        if (pos && (pos = strchr(pos, ':')) && (pos = strchr(pos, '"'))) {
+            pos++;
+            int i = 0;
+            while (*pos && *pos != '"' && i < 511) default_sf[i++] = *pos++;
+            default_sf[i] = '\0';
+        }
+    }
+
+    v1_scan_soundfonts(module_dir);
 
     if (g_soundfont_count > 0) {
         g_soundfont_index = 0;
@@ -259,130 +556,78 @@ static int plugin_on_load(const char *module_dir, const char *json_defaults) {
                 }
             }
         }
-        load_soundfont(g_soundfonts[g_soundfont_index].path);
+        v1_load_soundfont(g_soundfonts[g_soundfont_index].path);
     } else if (default_sf[0]) {
-        load_soundfont(default_sf);
+        v1_load_soundfont(default_sf);
     } else {
-        /* Try module directory legacy path */
         char sf_path[512];
         snprintf(sf_path, sizeof(sf_path), "%s/instrument.sf2", module_dir);
-        load_soundfont(sf_path);
+        v1_load_soundfont(sf_path);
     }
 
     return 0;
 }
 
-static void plugin_on_unload(void) {
+static void v1_on_unload(void) {
     plugin_log("SF2 plugin unloading");
-
     if (g_tsf) {
         tsf_close(g_tsf);
         g_tsf = NULL;
     }
 }
 
-static void plugin_on_midi(const uint8_t *msg, int len, int source) {
+static void v1_on_midi(const uint8_t *msg, int len, int source) {
     if (!g_tsf || len < 2) return;
 
     uint8_t status = msg[0] & 0xF0;
-    uint8_t channel = msg[0] & 0x0F;
     uint8_t data1 = msg[1];
     uint8_t data2 = (len > 2) ? msg[2] : 0;
 
-    int is_note = (status == 0x90 || status == 0x80);
-
-    /* Apply octave transpose to notes */
     int note = data1;
-    if (is_note) {
+    if (status == 0x90 || status == 0x80) {
         note += g_octave_transpose * 12;
         if (note < 0) note = 0;
         if (note > 127) note = 127;
     }
 
     switch (status) {
-        case 0x90: /* Note On */
-            if (data2 > 0) {
-                /* Note on with velocity */
-                tsf_note_on(g_tsf, g_current_preset, note, data2 / 127.0f);
-            } else {
-                /* Velocity 0 = note off */
-                tsf_note_off(g_tsf, g_current_preset, note);
-            }
+        case 0x90:
+            if (data2 > 0) tsf_note_on(g_tsf, g_current_preset, note, data2 / 127.0f);
+            else tsf_note_off(g_tsf, g_current_preset, note);
             break;
-
-        case 0x80: /* Note Off */
+        case 0x80:
             tsf_note_off(g_tsf, g_current_preset, note);
             break;
-
-        case 0xB0: /* Control Change */
-            /* CC1 = Modulation wheel */
-            if (data1 == 1) {
-                /* Could apply vibrato or modulation here */
-            }
-            /* CC64 = Sustain pedal */
-            if (data1 == 64) {
-                /* TinySoundFont doesn't have built-in sustain,
-                 * but we could implement it manually */
-            }
-            /* CC123 = All notes off */
-            if (data1 == 123) {
-                tsf_note_off_all(g_tsf);
-            }
+        case 0xB0:
+            if (data1 == 123) tsf_note_off_all(g_tsf);
             break;
-
-        case 0xA0: /* Polyphonic Aftertouch */
-            /* Could map to vibrato depth */
-            break;
-
-        case 0xD0: /* Channel Pressure (Aftertouch) */
-            /* Could map to vibrato depth */
-            break;
-
-        case 0xE0: /* Pitch Bend */
-            {
-                int bend = ((int)data2 << 7) | data1;
-                /* Use channel 0 for all pitch bend (Move uses channel 0) */
-                tsf_channel_set_pitchwheel(g_tsf, 0, bend);
-            }
+        case 0xE0:
+            tsf_channel_set_pitchwheel(g_tsf, 0, ((int)data2 << 7) | data1);
             break;
     }
 }
 
-static void plugin_set_param(const char *key, const char *val) {
+static void v1_set_param(const char *key, const char *val) {
     if (strcmp(key, "soundfont_path") == 0) {
-        load_soundfont(val);
-        if (g_soundfont_count > 0) {
-            const char *name = strrchr(val, '/');
-            name = name ? name + 1 : val;
-            for (int i = 0; i < g_soundfont_count; i++) {
-                if (strcmp(g_soundfonts[i].path, val) == 0 ||
-                    strcmp(g_soundfonts[i].name, name) == 0) {
-                    g_soundfont_index = i;
-                    break;
-                }
-            }
-        }
+        v1_load_soundfont(val);
     } else if (strcmp(key, "soundfont_index") == 0) {
-        set_soundfont_index(atoi(val));
+        v1_set_soundfont_index(atoi(val));
     } else if (strcmp(key, "next_soundfont") == 0) {
-        set_soundfont_index(g_soundfont_index + 1);
+        v1_set_soundfont_index(g_soundfont_index + 1);
     } else if (strcmp(key, "prev_soundfont") == 0) {
-        set_soundfont_index(g_soundfont_index - 1);
+        v1_set_soundfont_index(g_soundfont_index - 1);
     } else if (strcmp(key, "preset") == 0) {
-        int preset = atoi(val);
-        select_preset(preset);
+        v1_select_preset(atoi(val));
     } else if (strcmp(key, "octave_transpose") == 0) {
         g_octave_transpose = atoi(val);
         if (g_octave_transpose < -4) g_octave_transpose = -4;
         if (g_octave_transpose > 4) g_octave_transpose = 4;
     } else if (strcmp(key, "all_notes_off") == 0) {
-        if (g_tsf) {
-            tsf_note_off_all(g_tsf);
-        }
+        if (g_tsf) tsf_note_off_all(g_tsf);
     }
 }
 
-static int plugin_get_param(const char *key, char *buf, int buf_len) {
+static int v1_get_param(const char *key, char *buf, int buf_len) {
     if (strcmp(key, "soundfont_name") == 0) {
         strncpy(buf, g_soundfont_name, buf_len - 1);
         return strlen(buf);
@@ -405,62 +650,41 @@ static int plugin_get_param(const char *key, char *buf, int buf_len) {
     } else if (strcmp(key, "octave_transpose") == 0) {
         return snprintf(buf, buf_len, "%d", g_octave_transpose);
     }
-
     return -1;
 }
 
-static void plugin_render_block(int16_t *out_interleaved_lr, int frames) {
+static void v1_render_block(int16_t *out_interleaved_lr, int frames) {
     if (!g_tsf) {
-        /* No soundfont loaded - output silence */
         memset(out_interleaved_lr, 0, frames * 2 * sizeof(int16_t));
         g_active_voices = 0;
         return;
     }
 
-    /* Render to float buffer */
     tsf_render_float(g_tsf, g_render_buffer, frames, 0);
-
-    /* Count active voices (approximate) */
     g_active_voices = tsf_active_voice_count(g_tsf);
 
-    /* Convert float to int16 with clipping */
     for (int i = 0; i < frames * 2; i++) {
         float sample = g_render_buffer[i];
-
-        /* Soft clip to prevent harsh distortion */
         if (sample > 1.0f) sample = 1.0f;
         if (sample < -1.0f) sample = -1.0f;
-
-        /* Convert to int16 */
         out_interleaved_lr[i] = (int16_t)(sample * 32767.0f);
     }
 }
 
-/* === Plugin entry point === */
+static plugin_api_v1_t g_plugin_api_v1 = {
+    .api_version = MOVE_PLUGIN_API_VERSION,
+    .on_load = v1_on_load,
+    .on_unload = v1_on_unload,
+    .on_midi = v1_on_midi,
+    .set_param = v1_set_param,
+    .get_param = v1_get_param,
+    .render_block = v1_render_block
+};
 
+/* v1 Entry Point */
 plugin_api_v1_t* move_plugin_init_v1(const host_api_v1_t *host) {
     g_host = host;
-
-    /* Verify API version */
-    if (host->api_version != MOVE_PLUGIN_API_VERSION) {
-        char msg[128];
-        snprintf(msg, sizeof(msg), "API version mismatch: host=%d, plugin=%d",
-                 host->api_version, MOVE_PLUGIN_API_VERSION);
-        if (host->log) host->log(msg);
-        return NULL;
-    }
-
-    /* Initialize plugin API struct */
-    memset(&g_plugin_api, 0, sizeof(g_plugin_api));
-    g_plugin_api.api_version = MOVE_PLUGIN_API_VERSION;
-    g_plugin_api.on_load = plugin_on_load;
-    g_plugin_api.on_unload = plugin_on_unload;
-    g_plugin_api.on_midi = plugin_on_midi;
-    g_plugin_api.set_param = plugin_set_param;
-    g_plugin_api.get_param = plugin_get_param;
-    g_plugin_api.render_block = plugin_render_block;
-
-    plugin_log("SF2 plugin initialized");
-
-    return &g_plugin_api;
+    if (host->api_version != MOVE_PLUGIN_API_VERSION) return NULL;
+    plugin_log("SF2 plugin initialized (v1)");
+    return &g_plugin_api_v1;
 }
