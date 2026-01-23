@@ -1,4 +1,9 @@
 {
   "version": "0.3.1",
-  "download_url": "https://github.com/charlesvestal/move-anything-sf2/releases/download/v0.3.1/sf2-module.tar.gz"
+  "download_url": "https://github.com/charlesvestal/move-anything-sf2/releases/download/v0.3.1/sf2-module.tar.gz",
+  "name": "SoundFont",
+  "description": "SoundFont (.sf2) sample playback synthesizer using TinySoundFont. Provides polyphonic synthesis with support for General MIDI and custom SoundFont files.",
+  "requires": "SoundFont files (.sf2 format)",
+  "post_install": "Requires .sf2 soundfont files. Copy soundfonts to the soundfonts/ directory.",
+  "repo_url": "https://github.com/charlesvestal/move-anything-sf2"
 }
