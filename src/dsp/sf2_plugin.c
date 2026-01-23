@@ -40,6 +40,7 @@ typedef struct plugin_api_v2 {
     void (*on_midi)(void *instance, const uint8_t *msg, int len, int source);
     void (*set_param)(void *instance, const char *key, const char *val);
     int (*get_param)(void *instance, const char *key, char *buf, int buf_len);
+    int (*get_error)(void *instance, char *buf, int buf_len);
     void (*render_block)(void *instance, int16_t *out_interleaved_lr, int frames);
 } plugin_api_v2_t;
 
@@ -427,6 +428,17 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
     return -1;
 }
 
+static int v2_get_error(void *instance, char *buf, int buf_len) {
+    sf2_instance_t *inst = (sf2_instance_t *)instance;
+    if (!inst || !inst->load_error[0]) return 0;  /* No error */
+
+    int len = strlen(inst->load_error);
+    if (len >= buf_len) len = buf_len - 1;
+    memcpy(buf, inst->load_error, len);
+    buf[len] = '\0';
+    return len;
+}
+
 static void v2_render_block(void *instance, int16_t *out_interleaved_lr, int frames) {
     sf2_instance_t *inst = (sf2_instance_t *)instance;
     if (!inst || !inst->tsf) {
@@ -453,6 +465,7 @@ static plugin_api_v2_t g_plugin_api_v2 = {
     .on_midi = v2_on_midi,
     .set_param = v2_set_param,
     .get_param = v2_get_param,
+    .get_error = v2_get_error,
     .render_block = v2_render_block
 };
 
