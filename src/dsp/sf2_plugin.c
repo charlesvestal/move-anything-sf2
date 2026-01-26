@@ -86,6 +86,18 @@ static void plugin_log(const char *msg) {
     }
 }
 
+/* Helper: extract number from JSON */
+static int json_get_number(const char *json, const char *key, float *out) {
+    char search[64];
+    snprintf(search, sizeof(search), "\"%s\":", key);
+    const char *pos = strstr(json, search);
+    if (!pos) return -1;
+    pos += strlen(search);
+    while (*pos == ' ') pos++;
+    *out = (float)atof(pos);
+    return 0;
+}
+
 /* Soundfont Management */
 
 static int soundfont_entry_cmp(const void *a, const void *b) {
@@ -359,6 +371,20 @@ static void v2_set_param(void *instance, const char *key, const char *val) {
         if (inst->tsf) {
             tsf_note_off_all(inst->tsf);
         }
+    } else if (strcmp(key, "state") == 0) {
+        /* Restore state from JSON */
+        float f;
+        if (json_get_number(val, "soundfont_index", &f) == 0) {
+            set_soundfont_index(inst, (int)f);
+        }
+        if (json_get_number(val, "preset", &f) == 0) {
+            select_preset(inst, (int)f);
+        }
+        if (json_get_number(val, "octave_transpose", &f) == 0) {
+            inst->octave_transpose = (int)f;
+            if (inst->octave_transpose < -4) inst->octave_transpose = -4;
+            if (inst->octave_transpose > 4) inst->octave_transpose = 4;
+        }
     }
 }
 
@@ -401,6 +427,12 @@ static int v2_get_param(void *instance, const char *key, char *buf, int buf_len)
         return snprintf(buf, buf_len, "%d", inst->current_preset + 1);
     } else if (strcmp(key, "bank_count") == 0) {
         return snprintf(buf, buf_len, "%d", inst->soundfont_count);
+    }
+    /* State serialization for save/load */
+    else if (strcmp(key, "state") == 0) {
+        return snprintf(buf, buf_len,
+            "{\"soundfont_index\":%d,\"preset\":%d,\"octave_transpose\":%d}",
+            inst->soundfont_index, inst->current_preset, inst->octave_transpose);
     }
     /* UI hierarchy for shadow parameter editor */
     else if (strcmp(key, "ui_hierarchy") == 0) {
