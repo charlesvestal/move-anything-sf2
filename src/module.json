@@ -47,41 +47,20 @@
               "default": 1.0
             }
           ],
-          "knobs": ["octave_transpose", "gain"]
+          "knobs": [
+            "octave_transpose",
+            "gain"
+          ]
         }
       }
-    },
-    "chain_params": [
-      {
-        "key": "preset",
-        "name": "Preset",
-        "type": "int",
-        "min": 0,
-        "max_param": "preset_count",
-        "default": 0
-      },
-      {
-        "key": "octave_transpose",
-        "name": "Octave",
-        "type": "int",
-        "min": -4,
-        "max": 4,
-        "default": 0
-      },
-      {
-        "key": "gain",
-        "name": "Gain",
-        "type": "float",
-        "min": 0,
-        "max": 2,
-        "default": 1.0
-      }
-    ]
+    }
   },
   "assets": {
     "path": "soundfonts",
     "label": "Soundfonts",
-    "extensions": [".sf2"]
+    "extensions": [
+      ".sf2"
+    ]
   },
   "defaults": {
     "soundfont_path": "/data/UserData/move-anything/modules/sound_generators/sf2/instrument.sf2",
