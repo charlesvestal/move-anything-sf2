@@ -51,7 +51,7 @@ typedef struct plugin_api_v2 {
 static const host_api_v1_t *g_host = NULL;
 
 /* Constants */
-#define MAX_SOUNDFONTS 64
+#define MAX_SOUNDFONTS 2048
 #define MAX_PRESETS 1024
 
 typedef struct {
