@@ -288,11 +288,13 @@ static int load_soundfont(sf2_instance_t *inst, const char *path) {
     snprintf(msg, sizeof(msg), "SF2 loaded: %d presets", inst->preset_count);
     plugin_log(msg);
 
-    /* Select first preset */
+    /* Select first preset on all channels */
     if (inst->preset_count > 0) {
         strncpy(inst->preset_name, inst->presets[0].name, sizeof(inst->preset_name) - 1);
-        fluid_synth_program_select(inst->synth, 0, inst->sfont_id,
-                                   inst->presets[0].bank, inst->presets[0].program);
+        for (int ch = 0; ch < 16; ch++) {
+            fluid_synth_program_select(inst->synth, ch, inst->sfont_id,
+                                       inst->presets[0].bank, inst->presets[0].program);
+        }
     }
 
     return 0;
@@ -324,7 +326,10 @@ static void select_preset(sf2_instance_t *inst, int index) {
     preset_entry_t *p = &inst->presets[index];
     strncpy(inst->preset_name, p->name, sizeof(inst->preset_name) - 1);
 
-    fluid_synth_program_select(inst->synth, 0, inst->sfont_id, p->bank, p->program);
+    /* Set program on all 16 MIDI channels - notes may arrive on any channel */
+    for (int ch = 0; ch < 16; ch++) {
+        fluid_synth_program_select(inst->synth, ch, inst->sfont_id, p->bank, p->program);
+    }
 
     char msg[128];
     snprintf(msg, sizeof(msg), "Preset %d: %s (bank %d, prog %d)",
