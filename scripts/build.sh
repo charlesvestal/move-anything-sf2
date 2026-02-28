@@ -99,6 +99,7 @@ echo "Packaging..."
 cat src/module.json > dist/sf2/module.json
 cat src/ui.js > dist/sf2/ui.js
 cat build/dsp.so > dist/sf2/dsp.so
+[ -f src/help.json ] && cat src/help.json > dist/sf2/help.json
 chmod +x dist/sf2/dsp.so
 
 # Create soundfonts directory for user-supplied SF2 files

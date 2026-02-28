@@ -1,0 +1,161 @@
+{
+  "title": "SF2 Player",
+  "children": [
+    {
+      "title": "Overview",
+      "lines": [
+        "SoundFont (.sf2)",
+        "synthesizer using",
+        "FluidLite engine.",
+        "",
+        "64-voice polyphony.",
+        "",
+        "Plays presets from",
+        ".sf2 files via MIDI.",
+        "",
+        "A default General",
+        "MIDI soundfont is",
+        "included with 128+",
+        "instrument presets.",
+        "",
+        "Upload your own .sf2",
+        "files for more sounds."
+      ]
+    },
+    {
+      "title": "Setup",
+      "children": [
+        {
+          "title": "Getting Soundfonts",
+          "lines": [
+            "Upload .sf2 files",
+            "using the ME",
+            "Installer's asset",
+            "copy feature.",
+            "",
+            "Or find soundfonts:",
+            "musical-artifacts.com",
+            "",
+            "Files go to the",
+            "soundfonts/ folder",
+            "inside the module.",
+            "",
+            "New files are auto-",
+            "detected when you",
+            "browse soundfonts."
+          ]
+        },
+        {
+          "title": "Browsing Presets",
+          "lines": [
+            "Use the preset list",
+            "to scroll through",
+            "sounds in the loaded",
+            "soundfont.",
+            "",
+            "In standalone mode:",
+            " Jog: scroll presets",
+            " L/R: prev/next",
+            " Shift+L/R: switch",
+            "  soundfont file",
+            "",
+            "In Signal Chain:",
+            " Use the menu to",
+            " browse presets and",
+            " switch soundfonts."
+          ]
+        },
+        {
+          "title": "File Location",
+          "lines": [
+            "On-device path:",
+            "",
+            " modules/",
+            "  sound_generators/",
+            "   sf2/",
+            "    instrument.sf2",
+            "    soundfonts/",
+            "     YourFile.sf2",
+            "",
+            "instrument.sf2 is",
+            "the default General",
+            "MIDI soundfont.",
+            "",
+            "User uploads go in",
+            "the soundfonts/",
+            "subdirectory."
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Controls",
+      "children": [
+        {
+          "title": "Knobs",
+          "lines": [
+            "Knob 1: Octave",
+            " Transpose -4 to +4",
+            " octaves up or down",
+            "",
+            "Knob 2: Gain",
+            " Output level",
+            " 0.0 (silent) to",
+            " 2.0 (double volume)",
+            " Default: 1.0"
+          ]
+        },
+        {
+          "title": "MIDI Support",
+          "lines": [
+            "Notes:",
+            " Full velocity",
+            " sensitivity",
+            "",
+            "Pitch Bend:",
+            " 14-bit resolution",
+            " Standard +/- range",
+            "",
+            "Aftertouch:",
+            " Channel pressure",
+            " for expression",
+            "",
+            "Mod Wheel (CC 1):",
+            " Vibrato and mod",
+            " (per soundfont)",
+            "",
+            "All CCs forwarded",
+            "for expression,",
+            "sustain pedal, etc.",
+            "",
+            "Program Change:",
+            " Switches preset",
+            " directly"
+          ]
+        },
+        {
+          "title": "Built-in Effects",
+          "lines": [
+            "Reverb:",
+            " Toggle on/off in",
+            " the menu. Level",
+            " controls wet amount",
+            " (default: 0.9).",
+            "",
+            "Chorus:",
+            " Toggle on/off in",
+            " the menu. Level",
+            " controls intensity",
+            " (default: 2.0).",
+            "",
+            "These are FluidLite's",
+            "built-in effects.",
+            "You can also use",
+            "Signal Chain audio",
+            "FX for more options."
+          ]
+        }
+      ]
+    }
+  ]
+}
