@@ -67,7 +67,7 @@
     "hint_url_label": "Musical Artifacts"
   },
   "defaults": {
-    "soundfont_path": "/data/UserData/move-anything/modules/sound_generators/sf2/instrument.sf2",
+    "soundfont_path": "/data/UserData/schwung/modules/sound_generators/sf2/instrument.sf2",
     "preset": 0
   }
 }
